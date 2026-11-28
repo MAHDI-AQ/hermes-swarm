@@ -69,14 +69,33 @@ def _on_post_compaction(**kwargs: Any) -> None:
         logger.debug("hermes-swarm-bridge: post_compaction hook error", exc_info=True)
 
 
+def _make_pre_llm_call_hook(swarm_id: str, agent_name: str):
+    def _on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
+        parts: list[str] = []
+        try:
+            briefing = swarm_tools.consume_compacted_briefing(str(kwargs.get("session_id") or ""))
+            if briefing:
+                parts.append(briefing)
+        except Exception:
+            logger.debug("hermes-swarm-bridge: pre_llm_call compaction hook error", exc_info=True)
+        try:
+            turn_ctx = swarm_tools.get_turn_context()
+            eff_swarm = str(turn_ctx.get("swarm_id") or swarm_id).strip()
+            eff_agent = str(turn_ctx.get("agent") or agent_name).strip()
+            urgent = swarm_tools.poll_pending_mentions_context(swarm_id=eff_swarm, agent=eff_agent)
+            if urgent:
+                parts.append(urgent)
+        except Exception:
+            logger.debug("hermes-swarm-bridge: pre_llm_call inbox hook error", exc_info=True)
+        if parts:
+            return {"context": "\n\n".join(parts)}
+        return None
+
+    return _on_pre_llm_call
+
+
 def _on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
-    try:
-        briefing = swarm_tools.consume_compacted_briefing(str(kwargs.get("session_id") or ""))
-        if briefing:
-            return {"context": briefing}
-    except Exception:
-        logger.debug("hermes-swarm-bridge: pre_llm_call hook error", exc_info=True)
-    return None
+    return _make_pre_llm_call_hook("", "")(**kwargs)
 
 
 def _make_pre_verify_hook(swarm_id: str, agent_name: str):
@@ -158,7 +177,7 @@ def register(ctx: Any) -> None:
     if callable(register_hook):
         hooks = (
             ("post_compaction", _on_post_compaction),
-            ("pre_llm_call", _on_pre_llm_call),
+            ("pre_llm_call", _make_pre_llm_call_hook(swarm_id, agent_name)),
             ("pre_verify", _make_pre_verify_hook(swarm_id, agent_name)),
             ("post_tool_call", _make_post_tool_call_hook(agent_name)),
         )

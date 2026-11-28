@@ -75,6 +75,8 @@ _STATE_LOCK = threading.Lock()
 _BRIDGE_STATE: dict[tuple[str, str], dict[str, Any]] = {}
 _COMPACTED_SESSIONS: dict[str, float] = {}
 _HEARTBEAT_TIMESTAMPS: dict[tuple[str, str], float] = {}
+_INBOX_STAT_CACHE: dict[tuple[str, str], tuple[int, int, int]] = {}
+_INBOX_SEEN_SEQ: dict[tuple[str, str], int] = {}
 
 _TURN_CTX_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "swarm_id": ("swarm_id", "swarmId"),
@@ -909,7 +911,9 @@ def record_bridge_state(
             rem = str(remove_claim).strip()
             entry["claims"] = [c for c in entry["claims"] if c != rem]
         if last_read_seq is not None and int(last_read_seq) > 0:
-            entry["lastReadSeq"] = max(int(entry.get("lastReadSeq") or 0), int(last_read_seq))
+            seq_int = int(last_read_seq)
+            entry["lastReadSeq"] = max(int(entry.get("lastReadSeq") or 0), seq_int)
+            _INBOX_SEEN_SEQ[key] = max(int(_INBOX_SEEN_SEQ.get(key) or 0), seq_int)
 
 
 def get_bridge_briefing(swarm_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
@@ -986,6 +990,123 @@ def consume_compacted_briefing(session_id: str = "") -> str | None:
         swarm_id=turn_ctx.get("swarm_id"),
         agent=turn_ctx.get("agent"),
     )
+
+
+def poll_pending_mentions_context(
+    swarm_id: str | None = None,
+    agent: str | None = None,
+    *,
+    max_chars: int = 2400,
+) -> str | None:
+    """Stat-cached non-blocking check for unread mid-turn @mentions/pendingMentions targeting this worker."""
+    cfg, err = _require_config(swarm_id=swarm_id, agent=agent, require_agent=False)
+    if err is not None:
+        return None
+    eff_agent = str(agent or cfg.get("agent") or "").strip()
+    if not eff_agent:
+        return None
+    agent_low = eff_agent.lower()
+    if agent_low in ("coordinator", "primary", "narrator", "monitor"):
+        return None
+    paths = _resolve_board_paths(cfg)
+    if paths is None:
+        return None
+    bfile = paths[0]
+    try:
+        st = bfile.stat()
+    except OSError:
+        return None
+
+    stat_sig = (int(st.st_mtime_ns), int(st.st_size), int(getattr(st, "st_ino", 0)))
+    key = _state_key(cfg.get("swarm_id") or swarm_id, eff_agent)
+    with _STATE_LOCK:
+        if _INBOX_STAT_CACHE.get(key) == stat_sig:
+            return None
+
+    try:
+        raw = _read_text_shared(bfile)
+        board = json.loads(raw) if raw and raw.strip() else None
+    except Exception:
+        return None
+    if not isinstance(board, dict):
+        return None
+
+    members = board.get("members") if isinstance(board.get("members"), dict) else {}
+    member_rec: dict[str, Any] = {}
+    if eff_agent in members and isinstance(members[eff_agent], dict):
+        member_rec = members[eff_agent]
+    else:
+        for mk, mv in members.items():
+            if str(mk).strip().lower() == agent_low and isinstance(mv, dict):
+                member_rec = mv
+                break
+
+    with _STATE_LOCK:
+        _INBOX_STAT_CACHE[key] = stat_sig
+        seen_seq = max(
+            int(_INBOX_SEEN_SEQ.get(key) or 0),
+            int(member_rec.get("lastReadSeq") or 0),
+            int((_BRIDGE_STATE.get(key) or {}).get("lastReadSeq") or 0),
+        )
+
+    candidates_by_seq: dict[int, dict[str, Any]] = {}
+    pending_map = board.get("pendingMentions") if isinstance(board.get("pendingMentions"), dict) else {}
+    pending_list: list[Any] = []
+    for pk, pv in pending_map.items():
+        if str(pk).strip().lower() == agent_low and isinstance(pv, list):
+            pending_list.extend(pv)
+    for item in pending_list:
+        if not isinstance(item, dict):
+            continue
+        try:
+            seq = int(item.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        sender = str(item.get("sender") or "").strip()
+        if seq <= seen_seq or sender.lower() == agent_low:
+            continue
+        candidates_by_seq[seq] = item
+
+    for msg in board.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        try:
+            seq = int(msg.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seq <= seen_seq or seq in candidates_by_seq:
+            continue
+        sender = str(msg.get("sender") or "").strip()
+        if sender.lower() == agent_low:
+            continue
+        mentions_low = [str(m).strip().lstrip("@").lower() for m in (msg.get("mentions") or []) if str(m).strip()]
+        if msg.get("all") is True or agent_low in mentions_low or "all" in mentions_low:
+            candidates_by_seq[seq] = msg
+
+    if not candidates_by_seq:
+        return None
+
+    unread = [candidates_by_seq[s] for s in sorted(candidates_by_seq)]
+    max_new_seq = max(candidates_by_seq)
+    with _STATE_LOCK:
+        _INBOX_SEEN_SEQ[key] = max(int(_INBOX_SEEN_SEQ.get(key) or 0), max_new_seq)
+
+    lines = [f"[URGENT SWARM BOARD MESSAGE(S) FOR @{eff_agent} — READ BEFORE YOUR NEXT TOOL CALL]"]
+    for msg in unread:
+        seq = int(msg.get("seq") or 0)
+        sender = str(msg.get("sender") or "coordinator").strip()
+        summary = str(msg.get("summary") or "").strip()
+        details = str(msg.get("details") or "").strip()
+        lines.append(f"#{seq} from @{sender}: {summary}")
+        if details and details != summary:
+            if len(details) > 900:
+                details = details[:900].rstrip() + f"... (truncated — call swarm_read(seqs=[{seq}]) for full text)"
+            lines.append(details)
+
+    out = "\n".join(lines).strip()
+    if len(out) > max_chars:
+        out = out[: max(0, max_chars - 64)].rstrip() + f"\n... (truncated — call swarm_read(since={seen_seq}) for full details)"
+    return out
 
 
 def _append_archive_messages(archive_path: Path, messages: list[dict[str, Any]]) -> None:

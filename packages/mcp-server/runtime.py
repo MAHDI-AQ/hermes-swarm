@@ -798,6 +798,7 @@ def build_worker_preamble(
         "with these explicit arguments on every call so they work cleanly even inside persistent `hermes-gateway`):\n"
         f"   - Required context args on every native `swarm_*` call: {tool_ctx_args}\n"
         f'   - Post update / handoff / [done]: swarm_post({tool_ctx_args}, channel="main", kind="post|question|handoff|escalation", summary="@coordinator [done] ...", details="...", files=["a.py"])\n'
+        f'   - Post milestone progress (no @mention so zero wakeup spam): swarm_post({tool_ctx_args}, channel="main", kind="post", summary="[progress] <phase done>; starting <next phase>", details="...") — post briefly at major phase transitions and call `swarm_read` before starting any long build/GPU/benchmark run (urgent mid-turn `@mention`s also inject automatically).\n'
         f'   - Wake a peer: swarm_post({tool_ctx_args}, channel="main", kind="handoff", summary="@<peer> ...", details="...")\n'
         f'   - Read / status / wait: swarm_read({tool_ctx_args}, since=0) | swarm_status({tool_ctx_args}) | swarm_wait({tool_ctx_args}, since=<LAST_SEQ>, mentions_only=true, timeout_seconds=120)\n'
         f'   - Claim / release scope: swarm_claim({tool_ctx_args}, scope="path/or/lane", notes="...") | swarm_release({tool_ctx_args}, scope="path/or/lane")\n'

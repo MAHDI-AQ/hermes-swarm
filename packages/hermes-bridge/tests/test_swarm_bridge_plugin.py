@@ -1493,6 +1493,75 @@ class SwarmBridgePluginTests(unittest.TestCase):
         self.assertFalse(corrupt_lock.exists())
         self.assertEqual(list(Path(self.tmp.name).glob("*.reap.*")), [])
 
+    def test_pre_llm_call_surfaces_mid_turn_pending_mentions_once(self) -> None:
+        from hermes_swarm_bridge import swarm_tools
+
+        swarm_id = "swarm-midturn-inbox"
+        board_file = self.board_dir / "board.json"
+        board_doc = {
+            "schemaVersion": 2,
+            "swarmId": swarm_id,
+            "nextSeq": 7,
+            "members": {
+                "impl-1": {
+                    "name": "impl-1",
+                    "role": "worker",
+                    "runtime": "hermes",
+                    "state": "working",
+                    "lastReadSeq": 5,
+                }
+            },
+            "pendingMentions": {
+                "impl-1": [
+                    {
+                        "seq": 6,
+                        "sender": "coordinator",
+                        "summary": "STOP run_ab.sh and apply kernel fix first",
+                        "details": "Switch kernel signature back before running benchmarks.",
+                    }
+                ]
+            },
+            "messages": [],
+        }
+        board_file.write_text(json.dumps(board_doc), encoding="utf-8")
+
+        env = {
+            **self.base_clear_env,
+            "HERMES_SWARM_ID": swarm_id,
+            "HERMES_SWARM_AGENT": "impl-1",
+            "HERMES_SWARM_ROLE": "worker",
+            "HERMES_SWARM_BOARD_DIR": str(self.board_dir),
+        }
+        with _EnvPatch(env):
+            ctx = _FakeCtx()
+            self.plugin.register(ctx)
+            hook = ctx.hooks["pre_llm_call"]
+
+            # First mid-turn LLM call immediately surfaces unread #6
+            res1 = hook(session_id="sess-midturn")
+            self.assertIsNotNone(res1)
+            self.assertIn("#6 from @coordinator", res1["context"])
+            self.assertIn("STOP run_ab.sh", res1["context"])
+            self.assertIn("Switch kernel signature back", res1["context"])
+
+            # Second call with unchanged board.json returns None (stat-cached + deduped)
+            self.assertIsNone(hook(session_id="sess-midturn"))
+
+            # Adding a new @all message #7 surfaces #7 immediately without re-sending #6
+            board_doc["nextSeq"] = 8
+            board_doc["messages"].append({
+                "seq": 7,
+                "sender": "coordinator",
+                "mentions": ["all"],
+                "summary": "New @all update",
+                "details": "Check updated constraints.",
+            })
+            board_file.write_text(json.dumps(board_doc), encoding="utf-8")
+            res2 = hook(session_id="sess-midturn")
+            self.assertIsNotNone(res2)
+            self.assertNotIn("#6 from @coordinator", res2["context"])
+            self.assertIn("#7 from @coordinator: New @all update", res2["context"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
