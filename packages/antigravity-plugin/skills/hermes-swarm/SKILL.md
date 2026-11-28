@@ -74,8 +74,11 @@ Every Antigravity conversation owns **one** isolated swarm (`1 Antigravity conve
    - **Internal wake / health probe (never guess ports):** `http://127.0.0.1:9910` (or the port returned in `observer_ui_url`) is `hermes-a2a-mcp` (NOT the sidecar web server). Its `internal_token` lives at `<stateDir>/internal_token` (for example `~/.local/share/hermes-swarm/mcp-server/state/internal_token`), the auth header is `Authorization: Bearer <token>`, and the wake health probe is `GET /internal/wake/swarms`.
 2. **Coordinate by `#seq`:** Refer to earlier posts as `#4` instead of copy-pasting reports. Mentioning `@<worker>` automatically wakes or resumes that worker.
 3. **Escalate to Primary only when required:** When user input is required or final verified delivery is ready, call `swarm_board_post(sender="coordinator", kind="escalation", summary="@primary ...")` and rely on `wakeup_bridge` rather than also firing a duplicate `send_message` for the same hop.
-4. **Loop recovery:** If a worker is stuck looping, `swarm_worker(action="kill", ...)` it and hand its work to a fresh worker.
-5. **Quota-recovery resume:** Never kill-and-respawn on quota or capacity errors. Use `swarm_worker(action="switch_model", ...)` to preserve warm `context_id`; after any `switch_model` or quota reset, check `swarm_worker(action="status")` / `swarm_manage(action="status")` and resume any stalled work.
+4. **Mid-Turn Steering vs. Hard Abort (Long Remote Commands):**
+   - **Mid-turn steering (`@<worker>` post):** Posting `@<worker> ...` on the board steers an active Hermes worker as soon as its current tool call returns (`hermes-swarm-bridge`'s `transform_tool_result` hook appends `[URGENT SWARM BOARD MESSAGE(S)]` directly into the returning tool output so it persists in conversation history across subsequent steps, with `pre_llm_call` fallback).
+   - **Immediate hard abort (`swarm_worker(action="kill")`):** Neither board steering nor native `/steer` can kill an in-flight long remote command (such as an active `ssh` benchmark or build on the wrong binary/spec). When a worker must abort an active remote command immediately, call `swarm_worker(action="kill", name="<worker>")` right away and spawn/resume a replacement with the corrected spec.
+5. **Loop recovery:** If a worker is stuck looping, `swarm_worker(action="kill", ...)` it and hand its work to a fresh worker.
+6. **Quota-recovery resume:** Never kill-and-respawn on quota or capacity errors. Use `swarm_worker(action="switch_model", ...)` to preserve warm `context_id`; after any `switch_model` or quota reset, check `swarm_worker(action="status")` / `swarm_manage(action="status")` and resume any stalled work.
 
 ## Channels & Addressing
 

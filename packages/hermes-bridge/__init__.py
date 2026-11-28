@@ -134,6 +134,28 @@ def _make_post_tool_call_hook(agent_name: str):
     return _on_post_tool_call
 
 
+def _make_transform_tool_result_hook(swarm_id: str, agent_name: str):
+    def _on_transform_tool_result(**kwargs: Any) -> str | None:
+        try:
+            result = kwargs.get("result")
+            if not isinstance(result, str):
+                return None
+            tool_name = str(kwargs.get("tool_name") or "").strip()
+            if tool_name in ("swarm_read", "swarm_wait"):
+                return None
+            turn_ctx = swarm_tools.get_turn_context()
+            eff_swarm = str(turn_ctx.get("swarm_id") or swarm_id).strip()
+            eff_agent = str(turn_ctx.get("agent") or agent_name).strip()
+            urgent = swarm_tools.poll_pending_mentions_context(swarm_id=eff_swarm, agent=eff_agent)
+            if urgent:
+                return f"{result}\n\n{urgent}" if result else urgent
+        except Exception:
+            logger.debug("hermes-swarm-bridge: transform_tool_result hook error", exc_info=True)
+        return None
+
+    return _on_transform_tool_result
+
+
 def register(ctx: Any) -> None:
     """Register native Swarm Board tools; register worker prompt section only when HERMES_SWARM_ID is set."""
     for name in swarm_tools.SPECS:
@@ -180,6 +202,7 @@ def register(ctx: Any) -> None:
             ("pre_llm_call", _make_pre_llm_call_hook(swarm_id, agent_name)),
             ("pre_verify", _make_pre_verify_hook(swarm_id, agent_name)),
             ("post_tool_call", _make_post_tool_call_hook(agent_name)),
+            ("transform_tool_result", _make_transform_tool_result_hook(swarm_id, agent_name)),
         )
         for hook_name, hook_fn in hooks:
             try:

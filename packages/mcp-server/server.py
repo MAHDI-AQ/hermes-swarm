@@ -101,7 +101,7 @@ You are connected to the Hermes A2A Swarm Bridge (`hermes-a2a`), enabling a 3-ti
    - Reserve `swarm_worker` strictly for execution bricklaying: implementing pre-designed specs/patches, running builds, SSH/profiling/benchmark/test loops, and git/CI mechanics.
    - Publish `swarm_manage(action="set_plan", ...)`, spawn/resume/switch/diff/kill workers via
      `swarm_worker(...)` (`diff` accepts optional `name`, omitting `name` inspects all workers), manage channels via `swarm_manage(action="channel", ...)`, claim/release
-     scopes via `swarm_board_read(scope_action=...)`, and block zero-cost via `swarm_wait(since=...)`.
+     scopes via `swarm_board_read(scope_action=...)`, and block zero-cost via `swarm_wait(since=...)`. Note: posting `@<worker>` steers a running Hermes worker on its next tool result (`transform_tool_result` + `pre_llm_call`), whereas `swarm_worker(action="kill", name=...)` is required to hard-abort an in-flight long remote command immediately.
 4. Tier 3 (`subagent` — Hermes `delegate_task` leaf workers):
    - Spawned exclusively by Tier-2 Hermes workers; surfaced read-only under Members.
 """

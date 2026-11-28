@@ -1001,7 +1001,7 @@ class SwarmBridgePluginTests(unittest.TestCase):
             self.plugin.register(ctx)
             self.assertEqual(
                 set(ctx.hooks.keys()),
-                {"post_compaction", "pre_llm_call", "pre_verify", "post_tool_call"},
+                {"post_compaction", "pre_llm_call", "pre_verify", "post_tool_call", "transform_tool_result"},
             )
 
             # Populate state via swarm_claim + swarm_post
@@ -1561,6 +1561,65 @@ class SwarmBridgePluginTests(unittest.TestCase):
             self.assertIsNotNone(res2)
             self.assertNotIn("#6 from @coordinator", res2["context"])
             self.assertIn("#7 from @coordinator: New @all update", res2["context"])
+
+    def test_transform_tool_result_persists_urgent_steer_and_dedupes_pre_llm_call(self) -> None:
+        swarm_id = "swarm-transform-steer"
+        board_file = self.board_dir / "board.json"
+        board_doc = {
+            "schemaVersion": 2,
+            "swarmId": swarm_id,
+            "nextSeq": 7,
+            "members": {
+                "impl-2": {
+                    "name": "impl-2",
+                    "role": "worker",
+                    "runtime": "hermes",
+                    "state": "working",
+                    "lastReadSeq": 5,
+                }
+            },
+            "pendingMentions": {
+                "impl-2": [
+                    {
+                        "seq": 6,
+                        "sender": "coordinator",
+                        "summary": "STOP run_ab.sh and apply native_kernel_lb1 fix",
+                        "details": "Restore 5-param signature before running A/B.",
+                    }
+                ]
+            },
+            "messages": [],
+        }
+        board_file.write_text(json.dumps(board_doc), encoding="utf-8")
+
+        env = {
+            **self.base_clear_env,
+            "HERMES_SWARM_ID": swarm_id,
+            "HERMES_SWARM_AGENT": "impl-2",
+            "HERMES_SWARM_ROLE": "worker",
+            "HERMES_SWARM_BOARD_DIR": str(self.board_dir),
+        }
+        with _EnvPatch(env):
+            ctx = _FakeCtx()
+            self.plugin.register(ctx)
+            tx_hook = ctx.hooks["transform_tool_result"]
+            pre_hook = ctx.hooks["pre_llm_call"]
+
+            # Non-str multimodal results and swarm_read/swarm_wait results pass through untouched
+            self.assertIsNone(tx_hook(tool_name="vision", result={"_multimodal": True}))
+            self.assertIsNone(tx_hook(tool_name="swarm_read", result='{"ok": true}'))
+
+            # String tool result from terminal appends persistent urgent steer
+            steered = tx_hook(tool_name="terminal", result="exit code 0\nok")
+            self.assertIsNotNone(steered)
+            self.assertTrue(steered.startswith("exit code 0\nok\n\n"))
+            self.assertIn("#6 from @coordinator: STOP run_ab.sh", steered)
+            self.assertIn("Restore 5-param signature", steered)
+
+            # Immediately following pre_llm_call does NOT double-inject the same #6
+            self.assertIsNone(pre_hook(session_id="sess-transform"))
+            # Subsequent unchanged terminal call returns None
+            self.assertIsNone(tx_hook(tool_name="terminal", result="next output"))
 
 
 if __name__ == "__main__":
